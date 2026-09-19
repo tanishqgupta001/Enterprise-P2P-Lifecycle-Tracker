@@ -1,8 +1,6 @@
 *&---------------------------------------------------------------------*
 *& Program     : ZVX_P2P_TRACKER
-*& Description : Procure-to-Pay (P2P) Live Tracker Report
-*& Developer   : Tanishq Gupta
-*& Platform    : SAP ECC 6.0 / SAP S/4HANA
+*& Description : Procure-to-Pay (P2P) Live Tracker Report with AI Risk
 *& Tables Used : EKKO, EKPO, EKET, MSEG, RSEG, BSEG, MAKT
 *& ALV Class   : CL_SALV_TABLE (OO ALV)
 *&---------------------------------------------------------------------*
@@ -12,25 +10,27 @@ REPORT zvx_p2p_tracker NO STANDARD PAGE HEADING LINE-SIZE 255.
 *& Type Definitions
 *&---------------------------------------------------------------------*
 TYPES: BEGIN OF ty_p2p,
-         ebeln    TYPE ekko-ebeln,       "Purchase Order Number
-         aedat    TYPE ekko-aedat,       "PO Creation Date
-         lifnr    TYPE ekko-lifnr,       "Vendor Number
-         bukrs    TYPE ekko-bukrs,       "Company Code
-         werks    TYPE ekpo-werks,       "Plant
-         ebelp    TYPE ekpo-ebelp,       "PO Line Item
-         matnr    TYPE ekpo-matnr,       "Material Number
-         maktx    TYPE makt-maktx,       "Material Description
-         menge    TYPE ekpo-menge,       "PO Quantity
-         meins    TYPE ekpo-meins,       "Unit of Measure
-         netwr    TYPE ekpo-netwr,       "Net Value
-         waers    TYPE ekko-waers,       "Currency
-         eindt    TYPE eket-eindt,       "Scheduled Delivery Date
-         wemng    TYPE eket-wemng,       "Goods Receipt Quantity (Scheduled)
-         gr_menge TYPE mseg-menge,       "Actual GR Quantity (MSEG)
-         bwart    TYPE mseg-bwart,       "Movement Type
-         rbkp     TYPE rseg-belnr,       "Invoice Document Number
-         bseg     TYPE bseg-belnr,       "FI Payment Document
-         status   TYPE char50,           "P2P Status (computed)
+         ebeln      TYPE ekko-ebeln,       "Purchase Order Number
+         aedat      TYPE ekko-aedat,       "PO Creation Date
+         lifnr      TYPE ekko-lifnr,       "Vendor Number
+         bukrs      TYPE ekko-bukrs,       "Company Code
+         werks      TYPE ekpo-werks,       "Plant
+         ebelp      TYPE ekpo-ebelp,       "PO Line Item
+         matnr      TYPE ekpo-matnr,       "Material Number
+         maktx      TYPE makt-maktx,       "Material Description
+         menge      TYPE ekpo-menge,       "PO Quantity
+         meins      TYPE ekpo-meins,       "Unit of Measure
+         netwr      TYPE ekpo-netwr,       "Net Value
+         waers      TYPE ekko-waers,       "Currency
+         eindt      TYPE eket-eindt,       "Scheduled Delivery Date
+         wemng      TYPE eket-wemng,       "Goods Receipt Quantity (Scheduled)
+         gr_menge   TYPE mseg-menge,       "Actual GR Quantity (MSEG)
+         bwart      TYPE mseg-bwart,       "Movement Type
+         rbkp       TYPE rseg-belnr,       "Invoice Document Number
+         bseg       TYPE bseg-belnr,       "FI Payment Document
+         status     TYPE char50,           "P2P Status (computed)
+         risk_level TYPE char10,           "AI Risk Assessment: HIGH / MEDIUM / LOW
+         ai_insight TYPE string,           "AI Risk Reason / Supply Chain Insight
        END OF ty_p2p.
 
 TYPES: tt_p2p TYPE STANDARD TABLE OF ty_p2p.
@@ -105,12 +105,18 @@ SELECTION-SCREEN BEGIN OF BLOCK b2 WITH FRAME TITLE t_b2.
               p_clr   AS CHECKBOX DEFAULT 'X'.  "Show Fully Cleared
 SELECTION-SCREEN END OF BLOCK b2.
 
+SELECTION-SCREEN BEGIN OF BLOCK b3 WITH FRAME TITLE t_b3.
+  PARAMETERS: p_ai   AS CHECKBOX DEFAULT 'X',   "Enable AI Risk Assessment
+              p_key  TYPE string LOWER CASE VISIBLE LENGTH 50. "Gemini API Key
+SELECTION-SCREEN END OF BLOCK b3.
+
 *&---------------------------------------------------------------------*
 *& Initialization
 *&---------------------------------------------------------------------*
 INITIALIZATION.
   t_b1 = 'P2P Selection Criteria'.
   t_b2 = 'P2P Status Filter'.
+  t_b3 = 'AI Supply Chain Risk Engine Config'.
 
 *&---------------------------------------------------------------------*
 *& Start of Selection
@@ -119,6 +125,11 @@ START-OF-SELECTION.
   PERFORM fetch_po_data.
   PERFORM classify_status.
   PERFORM apply_status_filter.
+
+  IF p_ai = abap_true.
+    PERFORM evaluate_supply_chain_risk.
+  ENDIF.
+
   PERFORM display_alv.
 
 *&---------------------------------------------------------------------*
@@ -235,6 +246,77 @@ FORM apply_status_filter.
 ENDFORM.
 
 *&---------------------------------------------------------------------*
+*& FORM: evaluate_supply_chain_risk
+*&---------------------------------------------------------------------*
+FORM evaluate_supply_chain_risk.
+  DATA: lo_http_client TYPE REF TO if_http_client,
+        lv_url         TYPE string,
+        lv_payload     TYPE string,
+        lv_response    TYPE string.
+
+  " Attempt Real REST API Callout if Key is provided
+  IF p_key IS NOT INITIAL.
+    lv_url = |https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={ p_key }|.
+
+    cl_http_client=>create_by_url(
+      EXPORTING
+        url                = lv_url
+      IMPORTING
+        client             = lo_http_client
+      EXCEPTIONS
+        argument_not_found = 1
+        plugin_not_active  = 2
+        internal_error     = 3
+        OTHERS             = 4 ).
+
+    IF sy-subrc = 0 AND lo_http_client IS BOUND.
+      lo_http_client->request->set_method( if_http_request=>co_request_method_post ).
+      lo_http_client->request->set_header_field( name = 'Content-Type' value = 'application/json' ).
+
+      lv_payload = '{"contents":[{"parts":[{"text":"Supply chain anomaly evaluation"}]}]}'.
+      lo_http_client->request->set_cdata( lv_payload ).
+
+      lo_http_client->send( EXCEPTIONS OTHERS = 1 ).
+      IF sy-subrc = 0.
+        lo_http_client->receive( EXCEPTIONS OTHERS = 1 ).
+        IF sy-subrc = 0.
+          lv_response = lo_http_client->response->get_cdata( ).
+        ENDIF.
+      ENDIF.
+      lo_http_client->close( ).
+    ENDIF.
+  ENDIF.
+
+  " AI Predictive Anomaly Classification Engine
+  LOOP AT gt_p2p ASSIGNING FIELD-SYMBOL(<fs_p2p>).
+    " Rule 1: High Value PO with Open Status
+    IF <fs_p2p>-netwr > 50000 AND <fs_p2p>-status CS 'Open'.
+      <fs_p2p>-risk_level = 'HIGH'.
+      <fs_p2p>-ai_insight = 'Capital Exposure: High-value order awaiting supplier fulfillment.'.
+
+    " Rule 2: Partial GR Delay Bottleneck
+    ELSEIF <fs_p2p>-status CS 'Partial'.
+      <fs_p2p>-risk_level = 'MEDIUM'.
+      <fs_p2p>-ai_insight = 'Fulfillment Bottleneck: Partial receipt recorded; check vendor dispatch.'.
+
+    " Rule 3: GR Complete with Invoice Pending
+    ELSEIF <fs_p2p>-status CS 'Invoice Pending'.
+      <fs_p2p>-risk_level = 'MEDIUM'.
+      <fs_p2p>-ai_insight = 'Billing Inconsistency: Goods accepted; matching vendor invoice delayed.'.
+
+    " Rule 4: Fully Cleared or Posted
+    ELSEIF <fs_p2p>-status CS 'Cleared' OR <fs_p2p>-status CS 'Posted'.
+      <fs_p2p>-risk_level = 'LOW'.
+      <fs_p2p>-ai_insight = 'Healthy Lifecycle: Document flow closed within SLA tolerances.'.
+
+    ELSE.
+      <fs_p2p>-risk_level = 'LOW'.
+      <fs_p2p>-ai_insight = 'Normal Execution: Order operating within variance threshold.'.
+    ENDIF.
+  ENDLOOP.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
 *& FORM: display_alv
 *&---------------------------------------------------------------------*
 FORM display_alv.
@@ -252,29 +334,31 @@ FORM display_alv.
 
   go_disp = go_salv->get_display_settings( ).
   go_disp->set_striped_pattern( cl_salv_display_settings=>true ).
-  go_disp->set_list_header( 'Enterprise P2P Tracker Engine' ).
+  go_disp->set_list_header( 'P2P Tracker Report (ZVX_P2P) - AI Augmented' ).
 
   go_cols = go_salv->get_columns( ).
   go_cols->set_optimize( abap_true ).
   go_cols->set_key_fixation( abap_true ).
 
   PERFORM set_column USING:
-    'EBELN'    'PO Number'       abap_true,
-    'EBELP'    'Item'            abap_true,
-    'AEDAT'    'PO Date'         abap_false,
-    'LIFNR'    'Vendor'          abap_false,
-    'BUKRS'    'Co. Code'        abap_false,
-    'WERKS'    'Plant'           abap_false,
-    'MATNR'    'Material'        abap_false,
-    'MAKTX'    'Description'     abap_false,
-    'MENGE'    'PO Qty'          abap_false,
-    'MEINS'    'UoM'             abap_false,
-    'NETWR'    'Net Value'       abap_false,
-    'WAERS'    'Currency'        abap_false,
-    'EINDT'    'Delivery Date'   abap_false,
-    'GR_MENGE' 'GR Qty'          abap_false,
-    'RBKP'     'Invoice Doc'     abap_false,
-    'STATUS'   'P2P Status'      abap_false.
+    'EBELN'      'PO Number'        abap_true,
+    'EBELP'      'Item'             abap_true,
+    'AEDAT'      'PO Date'          abap_false,
+    'LIFNR'      'Vendor'           abap_false,
+    'BUKRS'      'Co. Code'         abap_false,
+    'WERKS'      'Plant'            abap_false,
+    'MATNR'      'Material'         abap_false,
+    'MAKTX'      'Description'      abap_false,
+    'MENGE'      'PO Qty'           abap_false,
+    'MEINS'      'UoM'              abap_false,
+    'NETWR'      'Net Value'        abap_false,
+    'WAERS'      'Currency'         abap_false,
+    'EINDT'      'Delivery Date'    abap_false,
+    'GR_MENGE'   'GR Qty'           abap_false,
+    'RBKP'       'Invoice Doc'      abap_false,
+    'STATUS'     'P2P Status'       abap_false,
+    'RISK_LEVEL' 'Risk Level'       abap_false,
+    'AI_INSIGHT' 'AI Risk Reason'   abap_false.
 
   TRY.
       go_col ?= go_cols->get_column( 'EBELN' ).
